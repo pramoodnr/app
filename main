@@ -1,0 +1,80 @@
+import logging
+import os
+import time
+import uuid
+
+from fastapi import FastAPI, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+
+APP_NAME = os.getenv("APP_NAME", "devops-portfolio-api")
+APP_ENV = os.getenv("APP_ENV", "development")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(APP_NAME)
+
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "path", "status"],
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency",
+    ["method", "path"],
+)
+
+app = FastAPI(title=APP_NAME, version="1.0.0")
+
+
+@app.middleware("http")
+async def observe_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - started
+    path = request.url.path
+    REQUEST_COUNT.labels(request.method, path, response.status_code).inc()
+    REQUEST_LATENCY.labels(request.method, path).observe(elapsed)
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s duration=%.4f",
+        request_id,
+        request.method,
+        path,
+        response.status_code,
+        elapsed,
+    )
+    return response
+
+
+@app.get("/")
+def root():
+    return {
+        "service": APP_NAME,
+        "environment": APP_ENV,
+        "message": "AWS EKS DevOps portfolio application is running",
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+
+@app.get("/ready")
+def ready():
+    return {"status": "ready"}
+
+
+@app.get("/api/v1/items/{item_id}")
+def get_item(item_id: int):
+    return {"item_id": item_id, "name": f"portfolio-item-{item_id}"}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
